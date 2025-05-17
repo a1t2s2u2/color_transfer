@@ -6,7 +6,9 @@ requires-python = ">=3.8"
 
 dependencies = [
   "numpy",
-  "opencv-python"
+  "opencv-python",
+  "scikit-learn",
+  "pot"
 ]
 
 [tool.setuptools.packages.find]
