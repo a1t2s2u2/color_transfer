@@ -54,10 +54,10 @@ def main():
     style = "styles/sunset.jpg"
     now = datetime.datetime.now()
     output = f"output/{now.year}年{now.month}月{now.day}日_{now.hour}時{now.minute}分{now.second}秒.jpg"
-    size = 800
-    iters = 1500
-    content_weight = 1.0
-    style_weight = 1e6
+    size = 400
+    iters = 1000
+    content_weight = 100
+    style_weight = 1e4
 
     if torch.cuda.is_available():
         device = torch.device('cuda')
