@@ -4,6 +4,10 @@ import ot
 from sklearn.neighbors import NearestNeighbors
 from datetime import datetime
 import os
+import warnings
+
+warnings.filterwarnings("ignore")
+np.seterr(all="ignore")
 
 SOURCE_PATH = "img/cat.jpg"
 TARGET_PATH = "img/sunset.jpg"
