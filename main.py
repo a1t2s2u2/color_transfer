@@ -1,86 +1,75 @@
+import os
+from datetime import datetime
+
 import cv2
 import numpy as np
 import ot
-from sklearn.neighbors import NearestNeighbors
-from datetime import datetime
-import os
-import warnings
+from sklearn.cluster import KMeans
 
-warnings.filterwarnings("ignore")
-np.seterr(all="ignore")
-
+# --- 設定: ここで入力画像パスと出力先ディレクトリを指定 ---
 SOURCE_PATH = "img/cat.jpg"
 TARGET_PATH = "img/sunset.jpg"
+OUTPUT_DIR  = "output"
 
-EPS = 0.01
-N_ITERS = 200
-RESIZE_RATIO = 0.3
-SAMPLE_RATIO = 0.3
+# --- OT + クラスタリング のハイパーパラメータ ---
+N_CLUSTERS = 200    # k-means のクラスタ数 (50～500 程度で調整)
+EPS        = 0.01   # Sinkhorn の正則化項
 
-def load_lab_pixels(path, sample_num=None, resize_ratio=1.0):
-    img = cv2.imread(path)
-    if resize_ratio < 1.0:
-        h0, w0 = img.shape[:2]
-        new_h = max(1, int(h0 * resize_ratio))
-        new_w = max(1, int(w0 * resize_ratio))
-        img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    h, w = lab.shape[:2]
-    pts = lab.reshape(-1, 3).astype(np.float32)
-    N = pts.shape[0]
-    if sample_num is None:
-        sample_num = int(N * SAMPLE_RATIO)
-    if N > sample_num:
-        idx = np.random.choice(N, sample_num, replace=False)
-        pts = pts[idx]
-    return pts, (h, w)
+def cluster_lab_centers(img_lab: np.ndarray, k: int):
+    """
+    LAB色空間上の画素を k-means で k クラスタにまとめる。
 
-def main():
-    img_src = cv2.imread(SOURCE_PATH)
-    if RESIZE_RATIO < 1.0:
-        h0, w0 = img_src.shape[:2]
-        new_h = max(1, int(h0 * RESIZE_RATIO))
-        new_w = max(1, int(w0 * RESIZE_RATIO))
-        img_src = cv2.resize(img_src, (new_w, new_h), interpolation=cv2.INTER_AREA)
-    lab_src = cv2.cvtColor(img_src, cv2.COLOR_BGR2LAB)
-    h, w = lab_src.shape[:2]
-    all_src_pts = lab_src.reshape(-1, 3).astype(np.float32)
-    n_pix = all_src_pts.shape[0]
-    sample_num = int(n_pix * SAMPLE_RATIO)
-    mem_bytes = n_pix * sample_num * 4
-    mem_mb = mem_bytes / (1024 ** 2)
-    mem_gb = mem_bytes / (1024 ** 3)
-    print(f"全画素数: {n_pix}, サンプリング数: {sample_num}")
-    print(f"想定メモリ消費量: {mem_mb:.1f} MB ({mem_gb:.2f} GB)")
-    if mem_gb > 12:
-        print("メモリ消費量が12GBを超えるため処理を中断します")
+    Args:
+        img_lab: (H,W,3) の LAB 画像
+        k:       クラスタ数
+
+    Returns:
+        centers: (k,3) 各クラスタの中心色
+        labels:  (H*W,) 各画素のクラスタ ID
+        weights: (k,) 各クラスタの重み (画素数比)
+        (H,W):   元画像の高さ・幅
+    """
+    H, W = img_lab.shape[:2]
+    pts = img_lab.reshape(-1, 3).astype(np.float64)
+    km = KMeans(n_clusters=k, random_state=0).fit(pts)
+    centers = km.cluster_centers_
+    labels  = km.labels_
+    counts  = np.bincount(labels, minlength=k)
+    weights = counts.astype(np.float64) / counts.sum()
+    return centers, labels, weights, (H, W)
+
+def color_transfer_ot():
+    # 1) 画像読み込み → LAB に変換
+    src_bgr = cv2.imread(SOURCE_PATH)
+    tgt_bgr = cv2.imread(TARGET_PATH)
+    if src_bgr is None or tgt_bgr is None:
+        print("Error: 入力画像の読み込みに失敗しました。パスを確認してください。")
         return
+    src_lab = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2LAB)
+    tgt_lab = cv2.cvtColor(tgt_bgr, cv2.COLOR_BGR2LAB)
 
-    src_pts, _ = load_lab_pixels(SOURCE_PATH, sample_num=None, resize_ratio=RESIZE_RATIO)
-    tgt_pts, _ = load_lab_pixels(TARGET_PATH, sample_num=None, resize_ratio=RESIZE_RATIO)
+    # 2) k-means クラスタリング
+    src_centers, src_labels, src_w, (H, W) = cluster_lab_centers(src_lab, N_CLUSTERS)
+    tgt_centers, tgt_labels, tgt_w, _      = cluster_lab_centers(tgt_lab, N_CLUSTERS)
 
-    N, M = src_pts.shape[0], tgt_pts.shape[0]
-    mu = np.ones(N) / N
-    nu = np.ones(M) / M
+    # 3) Sinkhorn OT 行列 P を計算
+    C = ot.dist(src_centers, tgt_centers, metric='sqeuclidean')  # (k,k) コスト行列
+    P = ot.sinkhorn(src_w, tgt_w, C, reg=EPS)                    # (k,k) 乗換行列
+    P_sum = P.sum(axis=1, keepdims=True)
+    P_sum[P_sum == 0] = 1.0
+    # 各ソース中心を移動させた先の色
+    mapped_centers = (P @ tgt_centers) / P_sum                  # (k,3)
 
-    C = ot.dist(src_pts, tgt_pts, metric='sqeuclidean')
-    P = ot.sinkhorn(mu, nu, C, reg=EPS, numItermax=N_ITERS)
-    P_sum = np.sum(P, axis=1, keepdims=True)
-    P_sum[P_sum == 0] = 1
-    src_pts_trans = (P @ tgt_pts) / P_sum
+    # 4) 各画素に対応するクラスタ中心色で出力画像を再構築
+    out_lab = mapped_centers[src_labels].reshape((H, W, 3)).astype(np.uint8)
+    out_bgr = cv2.cvtColor(out_lab, cv2.COLOR_LAB2BGR)
 
-    nn = NearestNeighbors(n_neighbors=1, algorithm='auto').fit(src_pts)
-    idx = nn.kneighbors(all_src_pts, return_distance=False).flatten()
-    all_trans = src_pts_trans[idx]
-    all_trans = np.clip(all_trans, 0, 255)
-    lab_out = all_trans.reshape((h, w, 3)).astype(np.uint8)
-    bgr_out = cv2.cvtColor(lab_out, cv2.COLOR_LAB2BGR)
-    os.makedirs("output", exist_ok=True)
-    now = datetime.now()
-    filename = now.strftime("%Y年%m月%d日_%H時%M分%S秒.jpg")
-    out_path = os.path.join("output", filename)
-    cv2.imwrite(out_path, bgr_out)
+    # 5) ファイル出力
+    os.makedirs(OUTPUT_DIR, exist_ok=True)
+    fn = datetime.now().strftime("%Y%m%d_%H%M%S_ot.jpg")
+    out_path = os.path.join(OUTPUT_DIR, fn)
+    cv2.imwrite(out_path, out_bgr)
     print(f"▶ カラー・トランスファー完了: {out_path}")
 
 if __name__ == "__main__":
-    main()
+    color_transfer_ot()
