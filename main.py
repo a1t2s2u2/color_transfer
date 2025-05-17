@@ -2,10 +2,11 @@ import cv2
 import numpy as np
 import ot
 from sklearn.neighbors import NearestNeighbors
+from datetime import datetime
+import os
 
 SOURCE_PATH = "img/cat.jpg"
 TARGET_PATH = "img/sunset.jpg"
-OUTPUT_PATH = "output.jpg"
 
 EPS = 0.01
 N_ITERS = 200
@@ -70,8 +71,12 @@ def main():
     all_trans = np.clip(all_trans, 0, 255)
     lab_out = all_trans.reshape((h, w, 3)).astype(np.uint8)
     bgr_out = cv2.cvtColor(lab_out, cv2.COLOR_LAB2BGR)
-    cv2.imwrite(OUTPUT_PATH, bgr_out)
-    print(f"▶ カラー・トランスファー完了: {OUTPUT_PATH}")
+    os.makedirs("output", exist_ok=True)
+    now = datetime.now()
+    filename = now.strftime("%Y年%m月%d日_%H時%M分%S秒.jpg")
+    out_path = os.path.join("output", filename)
+    cv2.imwrite(out_path, bgr_out)
+    print(f"▶ カラー・トランスファー完了: {out_path}")
 
 if __name__ == "__main__":
     main()

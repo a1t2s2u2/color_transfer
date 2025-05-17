@@ -22,7 +22,7 @@ env/
 
 # 入力・出力ディレクトリ
 img/
-output.jpg
+output/
 
 # 仮想環境
 .venv/
