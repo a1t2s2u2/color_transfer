@@ -1,77 +1,105 @@
 import os
-from datetime import datetime
+from PIL import Image
+import torch
+import torch.nn as nn
+import torch.optim as optim
+import torchvision.transforms as T
+import torchvision.models as models
 
-import cv2
-import numpy as np
-import ot
-from sklearn.cluster import KMeans
+# レイヤー指定
+CONTENT_LAYERS = ['conv4_2']
+STYLE_LAYERS   = ['conv1_1','conv2_1','conv3_1','conv4_1','conv5_1']
 
-# --- 設定 ---
-SOURCE_PATH = "img/cat.jpg"
-TARGET_PATH = "img/sunset.jpg"
-OUTPUT_DIR  = "output"
+def get_image(path, size):
+    img = Image.open(path).convert('RGB')
+    transform = T.Compose([
+        T.Resize(size),
+        T.ToTensor(),
+        T.Lambda(lambda x: x.mul(255))
+    ])
+    return transform(img).unsqueeze(0)  # (1,3,H,W)
 
-# k-means のクラスタ数
-N_CLUSTERS = 200
+def gram_matrix(feat):
+    b, c, h, w = feat.size()
+    f = feat.view(b, c, h*w)
+    return torch.bmm(f, f.transpose(1,2)) / (c*h*w)
 
-# Sinkhorn の正則化パラメータ（大きめに）
-EPS = 0.1
+class StyleTransferNet(nn.Module):
+    def __init__(self, cnn):
+        super().__init__()
+        self.model  = cnn.features.eval()
+        # 各レイヤーの出力を取り出せるよう登録
+        self.content_idxs = []
+        self.style_idxs   = []
+        for i, layer in enumerate(self.model):
+            name = f"conv{i//2+1}_{i%2+1}"  # 例: conv4_2
+            if name in CONTENT_LAYERS: self.content_idxs.append(i)
+            if name in STYLE_LAYERS:   self.style_idxs.append(i)
 
-def cluster_lab_centers(img_lab: np.ndarray, k: int):
-    H, W = img_lab.shape[:2]
-    pts = img_lab.reshape(-1, 3).astype(np.float64)
-    km = KMeans(n_clusters=k, random_state=0).fit(pts)
-    centers = km.cluster_centers_          # (k,3)
-    labels  = km.labels_                   # (H*W,)
-    counts  = np.bincount(labels, minlength=k)
-    weights = counts.astype(np.float64) / counts.sum()
-    return centers, labels, weights, (H, W)
+    def forward(self, x):
+        content_feats = []
+        style_feats   = []
+        for i, layer in enumerate(self.model):
+            x = layer(x)
+            if i in self.content_idxs:
+                content_feats.append(x)
+            if i in self.style_idxs:
+                style_feats.append(x)
+        return content_feats, style_feats
 
-def color_transfer_ot_fixed():
-    # 1) 読み込み→LAB変換
-    src_bgr = cv2.imread(SOURCE_PATH)
-    tgt_bgr = cv2.imread(TARGET_PATH)
-    if src_bgr is None or tgt_bgr is None:
-        print("Error: 画像の読み込みに失敗しました。パスを確認してください。")
-        return
-    src_lab = cv2.cvtColor(src_bgr, cv2.COLOR_BGR2LAB)
-    tgt_lab = cv2.cvtColor(tgt_bgr, cv2.COLOR_BGR2LAB)
+import datetime
 
-    # 2) クラスタリング
-    src_centers, src_labels, src_w, (H, W) = cluster_lab_centers(src_lab, N_CLUSTERS)
-    tgt_centers, tgt_labels, tgt_w, _      = cluster_lab_centers(tgt_lab, N_CLUSTERS)
+def main():
+    content = "img/cat.jpg"
+    style = "styles/sunset.jpg"
+    now = datetime.datetime.now()
+    output = f"output/{now.year}年{now.month}月{now.day}日_{now.hour}時{now.minute}分{now.second}秒.jpg"
+    size = 1024
+    iters = 500
+    content_weight = 1.0
+    style_weight = 1e6
 
-    # 3) コスト行列計算＆正規化
-    C = ot.dist(src_centers, tgt_centers, metric='sqeuclidean')  # (k,k)
-    C_max = C.max() or 1.0
-    C = C / C_max                                             # [0,1]にスケール
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    content_img = get_image(content, size).to(device)
+    style_img   = get_image(style,   size).to(device)
+    input_img   = content_img.clone().requires_grad_(True)
 
-    # 4) Sinkhorn OT
-    P = ot.sinkhorn(src_w, tgt_w, C, reg=EPS, numItermax=1000)
-    if np.allclose(P, 0):
-        print("Warning: Sinkhorn underflow → strict EMD にフォールバック")
-        P = ot.emd(src_w, tgt_w, C)
+    cnn = models.vgg19(pretrained=True).to(device).eval()
+    net = StyleTransferNet(cnn)
 
-    # 5) マッピング先色を計算
-    P_sum = P.sum(axis=1, keepdims=True)
-    P_sum[P_sum == 0] = 1.0
-    mapped_centers = (P @ tgt_centers) / P_sum
-    mapped_centers = np.clip(mapped_centers, 0, 255)
+    with torch.no_grad():
+        target_content, _ = net(content_img)
+        _, target_styles  = net(style_img)
+        target_grams      = [gram_matrix(f) for f in target_styles]
 
-    # --（任意）デバッグ出力
-    print("mapped_centers min:", mapped_centers.min(axis=0))
-    print("mapped_centers max:", mapped_centers.max(axis=0))
+    optimizer = optim.LBFGS([input_img], lr=1.0)
 
-    # 6) 各ピクセルに色を再割当
-    out_lab = mapped_centers[src_labels].reshape((H, W, 3)).astype(np.uint8)
-    out_bgr = cv2.cvtColor(out_lab, cv2.COLOR_LAB2BGR)
+    run = [0]
+    while run[0] < iters:
+        def closure():
+            optimizer.zero_grad()
+            content_feats, style_feats = net(input_img)
+            content_loss = 0
+            for f, t in zip(content_feats, target_content):
+                content_loss += nn.functional.mse_loss(f, t)
 
-    # 7) 保存
-    os.makedirs(OUTPUT_DIR, exist_ok=True)
-    fn = datetime.now().strftime("%Y%m%d_%H%M%S_fixed.jpg")
-    out_path = os.path.join(OUTPUT_DIR, fn)
-    cv2.imwrite(out_path, out_bgr)
-    print(f"▶ カラー・トランスファー完了: {out_path}")
+            style_loss = 0
+            for f, g in zip(style_feats, target_grams):
+                style_loss += nn.functional.mse_loss(gram_matrix(f), g)
+
+            loss = content_weight * content_loss + style_weight * style_loss
+            loss.backward()
+            run[0] += 1
+            if run[0] % 50 == 0:
+                print(f"Iter {run[0]}/{iters}, Content: {content_loss.item():.2f}, Style: {style_loss.item():.2f}")
+            return loss
+
+        optimizer.step(closure)
+
+    output_img = input_img.detach().cpu().squeeze().clamp(0,255).div(255)
+    os.makedirs(os.path.dirname(output), exist_ok=True)
+    T.ToPILImage()(output_img).save(output)
+    print("▶ Saved:", output)
 
 if __name__ == "__main__":
-    color_transfer_ot_fixed()
+    main()
