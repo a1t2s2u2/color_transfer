@@ -54,12 +54,17 @@ def main():
     style = "styles/sunset.jpg"
     now = datetime.datetime.now()
     output = f"output/{now.year}年{now.month}月{now.day}日_{now.hour}時{now.minute}分{now.second}秒.jpg"
-    size = 1024
-    iters = 500
+    size = 800
+    iters = 1500
     content_weight = 1.0
     style_weight = 1e6
 
-    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    if torch.cuda.is_available():
+        device = torch.device('cuda')
+    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        device = torch.device('mps')
+    else:
+        device = torch.device('cpu')
     print(f"device: {device}")
     content_img = get_image(content, size).to(device)
     style_img   = get_image(style,   size).to(device)
