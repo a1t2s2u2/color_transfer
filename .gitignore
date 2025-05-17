@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+pip-wheel-metadata/
+*.pyo
+
+# VSCode
+.vscode/
+
+# macOS
+.DS_Store
+
+# 仮想環境
+venv/
+env/
+
+# 入力・出力ディレクトリ
+img/
+output/

@@ -1,0 +1,13 @@
+[project]
+name = "color_transfer"
+version = "0.1.0"
+description = "最適輸送カラー・トランスファー（Sinkhorn）"
+requires-python = ">=3.8"
+
+dependencies = [
+  "numpy",
+  "opencv-python"
+]
+
+[tool.setuptools.packages.find]
+include = []
