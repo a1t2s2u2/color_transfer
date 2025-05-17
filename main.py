@@ -60,6 +60,7 @@ def main():
     style_weight = 1e6
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"device: {device}")
     content_img = get_image(content, size).to(device)
     style_img   = get_image(style,   size).to(device)
     input_img   = content_img.clone().requires_grad_(True)
